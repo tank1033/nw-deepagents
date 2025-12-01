@@ -13,12 +13,12 @@ tavily_client = TavilyClient(api_key=settings.tavily_api_key) if settings.has_ta
 
 
 def http_request(
-    url: str,
-    method: str = "GET",
-    headers: dict[str, str] | None = None,
-    data: str | dict | None = None,
-    params: dict[str, str] | None = None,
-    timeout: int = 30,
+        url: str,
+        method: str = "GET",
+        headers: dict[str, str] | None = None,
+        data: str | dict | None = None,
+        params: dict[str, str] | None = None,
+        timeout: int = 30,
 ) -> dict[str, Any]:
     """Make HTTP requests to APIs and web services.
 
@@ -87,13 +87,54 @@ def http_request(
         }
 
 
+def _search_with_duckduckgo(query: str, max_results: int = 5) -> dict[str, Any]:
+    """Fallback web search using DuckDuckGo (free, no API key required)."""
+    import warnings
+
+    try:
+        # Suppress deprecation warning about package rename
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*duckduckgo_search.*")
+
+            # Try new package name first, fallback to old name
+            try:
+                from ddgs import DDGS
+            except ImportError:
+                from duckduckgo_search import DDGS
+
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=max_results))
+
+                formatted_results = []
+                for r in results:
+                    formatted_results.append({
+                        "title": r.get("title", ""),
+                        "url": r.get("href", ""),
+                        "content": r.get("body", ""),
+                        "score": 0.8,  # Default score for DuckDuckGo results
+                    })
+
+                return {
+                    "results": formatted_results,
+                    "query": query,
+                    "source": "duckduckgo",
+                }
+    except ImportError:
+        return {
+            "error": "DuckDuckGo search requires 'ddgs' or 'duckduckgo-search' package. Install with: pip install ddgs",
+            "query": query,
+        }
+    except Exception as e:
+        return {"error": f"DuckDuckGo search error: {e!s}", "query": query}
+
+
 def web_search(
-    query: str,
-    max_results: int = 5,
-    topic: Literal["general", "news", "finance"] = "general",
-    include_raw_content: bool = False,
+        query: str,
+        max_results: int = 5,
+        topic: Literal["general", "news", "finance"] = "general",
+        include_raw_content: bool = False,
 ):
-    """Search the web using Tavily for current information and documentation.
+    """Search the web using Tavily (preferred) or DuckDuckGo (fallback) for current information.
 
     This tool searches the web and returns relevant results. After receiving results,
     you MUST synthesize the information into a natural, helpful response for the user.
@@ -112,6 +153,7 @@ def web_search(
             - content: Relevant excerpt from the page
             - score: Relevance score (0-1)
         - query: The original search query
+        - source: Search engine used ("tavily" or "duckduckgo")
 
     IMPORTANT: After using this tool:
     1. Read through the 'content' field of each result
@@ -120,21 +162,24 @@ def web_search(
     4. Cite sources by mentioning the page titles or URLs
     5. NEVER show the raw JSON to the user - always provide a formatted response
     """
-    if tavily_client is None:
-        return {
-            "error": "Tavily API key not configured. Please set TAVILY_API_KEY environment variable.",
-            "query": query,
-        }
+    # Try Tavily first if available
+    if tavily_client is not None:
+        try:
+            result = tavily_client.search(
+                query,
+                max_results=max_results,
+                include_raw_content=include_raw_content,
+                topic=topic,
+            )
+            if isinstance(result, dict):
+                result["source"] = "tavily"
+            return result
+        except Exception as e:
+            # Fallback to DuckDuckGo if Tavily fails
+            return _search_with_duckduckgo(query, max_results)
 
-    try:
-        return tavily_client.search(
-            query,
-            max_results=max_results,
-            include_raw_content=include_raw_content,
-            topic=topic,
-        )
-    except Exception as e:
-        return {"error": f"Web search error: {e!s}", "query": query}
+    # Fallback to DuckDuckGo if no Tavily API key
+    return _search_with_duckduckgo(query, max_results)
 
 
 def fetch_url(url: str, timeout: int = 30) -> dict[str, Any]:

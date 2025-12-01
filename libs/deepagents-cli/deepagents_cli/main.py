@@ -178,13 +178,15 @@ async def simple_cli(
 
     if not settings.has_tavily:
         console.print(
-            "[yellow]⚠ Web search disabled:[/yellow] TAVILY_API_KEY not found.",
+            "[yellow]⚠ Tavily API key not found.[/yellow]",
             style=COLORS["dim"],
         )
-        console.print("  To enable web search, set your Tavily API key:", style=COLORS["dim"])
-        console.print("    export TAVILY_API_KEY=your_api_key_here", style=COLORS["dim"])
         console.print(
-            "  Or add it to your .env file. Get your key at: https://tavily.com",
+            "  Web search will use DuckDuckGo (free, no API key required).",
+            style=COLORS["dim"],
+        )
+        console.print(
+            "  For better results, set TAVILY_API_KEY: export TAVILY_API_KEY=your_key",
             style=COLORS["dim"],
         )
         console.print()
@@ -288,10 +290,8 @@ async def _run_agent_session(
         sandbox_type: Type of sandbox being used
         setup_script_path: Path to setup script that was run (if any)
     """
-    # Create agent with conditional tools
-    tools = [http_request, fetch_url]
-    if settings.has_tavily:
-        tools.append(web_search)
+    # Create agent with tools (web_search always available, uses DuckDuckGo if no Tavily key)
+    tools = [http_request, fetch_url, web_search]
 
     agent, composite_backend = create_agent_with_config(
         model, assistant_id, tools, sandbox=sandbox_backend, sandbox_type=sandbox_type

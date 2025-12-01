@@ -49,7 +49,6 @@ COMMANDS = {
     "exit": "Exit the CLI",
 }
 
-
 # Maximum argument length for display
 MAX_ARG_LENGTH = 150
 
@@ -135,6 +134,7 @@ class Settings:
     openai_api_key: str | None
     anthropic_api_key: str | None
     google_api_key: str | None
+    zhipu_api_key: str | None
     tavily_api_key: str | None
 
     # Project information
@@ -154,6 +154,7 @@ class Settings:
         openai_key = os.environ.get("OPENAI_API_KEY")
         anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
         google_key = os.environ.get("GOOGLE_API_KEY")
+        zhipu_key = os.environ.get("ZHIPU_API_KEY")
         tavily_key = os.environ.get("TAVILY_API_KEY")
 
         # Detect project
@@ -163,6 +164,7 @@ class Settings:
             openai_api_key=openai_key,
             anthropic_api_key=anthropic_key,
             google_api_key=google_key,
+            zhipu_api_key=zhipu_key,
             tavily_api_key=tavily_key,
             project_root=project_root,
         )
@@ -181,6 +183,11 @@ class Settings:
     def has_google(self) -> bool:
         """Check if Google API key is configured."""
         return self.google_api_key is not None
+
+    @property
+    def has_zhipu(self) -> bool:
+        """Check if Zhipu API key is configured."""
+        return self.zhipu_api_key is not None
 
     @property
     def has_tavily(self) -> bool:
@@ -400,12 +407,136 @@ def create_model() -> BaseChatModel:
             temperature=0,
             max_tokens=None,
         )
+    if settings.has_zhipu:
+        # Use zhipuai SDK directly with a LangChain-compatible wrapper
+        try:
+            import zhipuai
+            from langchain_core.language_models.chat_models import BaseChatModel
+            from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
+            from langchain_core.outputs import ChatGeneration, ChatResult
+            from typing import Any, List, Optional, AsyncIterator, Iterator
+
+            class ZhipuChatModel(BaseChatModel):
+                """Wrapper for Zhipu AI using zhipuai SDK."""
+
+                model: str = "glm-4"
+                api_key: str
+                temperature: float = 0
+
+                def __init__(self, model: str = "glm-4", api_key: str | None = None, temperature: float = 0,
+                             **kwargs: Any):
+                    # Get API key from parameter or environment
+                    final_api_key = api_key or os.environ.get("ZHIPU_API_KEY", "")
+                    if not final_api_key:
+                        raise ValueError("ZHIPU_API_KEY is required")
+
+                    # Initialize with proper field values for Pydantic
+                    super().__init__(
+                        model=model,
+                        api_key=final_api_key,
+                        temperature=temperature,
+                        **kwargs
+                    )
+                    # Initialize client after Pydantic validation (not a Pydantic field)
+                    object.__setattr__(self, "client", zhipuai.ZhipuAI(api_key=self.api_key))
+
+                def _generate(
+                        self,
+                        messages: List[BaseMessage],
+                        stop: Optional[List[str]] = None,
+                        run_manager: Any = None,
+                        **kwargs: Any,
+                ) -> ChatResult:
+                    # Convert LangChain messages to Zhipu format
+                    zhipu_messages = []
+                    for msg in messages:
+                        if isinstance(msg, HumanMessage):
+                            zhipu_messages.append({"role": "user", "content": str(msg.content)})
+                        elif isinstance(msg, AIMessage):
+                            zhipu_messages.append({"role": "assistant", "content": str(msg.content)})
+                        elif isinstance(msg, SystemMessage):
+                            zhipu_messages.append({"role": "system", "content": str(msg.content)})
+
+                    # Call Zhipu API
+                    try:
+                        response = self.client.chat.completions.create(
+                            model=self.model,
+                            messages=zhipu_messages,
+                            temperature=self.temperature,
+                        )
+
+                        # Extract content from response
+                        if hasattr(response, 'choices') and len(response.choices) > 0:
+                            message_content = response.choices[0].message.content
+                        elif hasattr(response, 'data') and len(response.data) > 0:
+                            message_content = response.data[0].message.content
+                        else:
+                            # Try to get content from response directly
+                            message_content = str(response) if response else ""
+
+                        # Convert response to LangChain format
+                        ai_message = AIMessage(content=message_content)
+                        generation = ChatGeneration(message=ai_message)
+                        return ChatResult(generations=[generation])
+                    except Exception as e:
+                        # Return error in ChatResult format
+                        error_msg = f"Zhipu API error: {str(e)}"
+                        ai_message = AIMessage(content=error_msg)
+                        generation = ChatGeneration(message=ai_message)
+                        return ChatResult(generations=[generation])
+
+                async def _astream(
+                        self,
+                        messages: List[BaseMessage],
+                        stop: Optional[List[str]] = None,
+                        run_manager: Any = None,
+                        **kwargs: Any,
+                ) -> AsyncIterator[ChatResult]:
+                    """Async stream implementation."""
+                    # For now, use non-streaming but wrap in async
+                    result = self._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+                    yield result
+
+                def _stream(
+                        self,
+                        messages: List[BaseMessage],
+                        stop: Optional[List[str]] = None,
+                        run_manager: Any = None,
+                        **kwargs: Any,
+                ) -> Iterator[ChatResult]:
+                    """Stream implementation."""
+                    # For now, use non-streaming
+                    result = self._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+                    yield result
+
+                def _should_stream(self, **kwargs: Any) -> bool:
+                    """Determine if streaming should be used."""
+                    # Check if streaming is requested
+                    return kwargs.get("stream", False) or kwargs.get("streaming", False)
+
+                def bind_tools(self, tools, **kwargs):
+                    """Bind tools to the model (required for tool calling)."""
+                    # For now, return self as tools are handled elsewhere
+                    return self
+
+                @property
+                def _llm_type(self) -> str:
+                    return "zhipu"
+
+            model_name = os.environ.get("ZHIPU_MODEL", "glm-4")
+            console.print(f"[dim]Using Zhipu model: {model_name}[/dim]")
+            return ZhipuChatModel(model=model_name, api_key=settings.zhipu_api_key, temperature=0)
+        except ImportError:
+            console.print("[bold red]Error:[/bold red] zhipuai package not found.")
+            console.print("Please install it with: uv pip install zhipuai")
+            sys.exit(1)
     console.print("[bold red]Error:[/bold red] No API key configured.")
     console.print("\nPlease set one of the following environment variables:")
     console.print("  - OPENAI_API_KEY     (for OpenAI models like gpt-5-mini)")
     console.print("  - ANTHROPIC_API_KEY  (for Claude models)")
     console.print("  - GOOGLE_API_KEY     (for Google Gemini models)")
+    console.print("  - ZHIPU_API_KEY      (for Zhipu GLM models)")
     console.print("\nExample:")
-    console.print("  export OPENAI_API_KEY=your_api_key_here")
+    console.print("  export ZHIPU_API_KEY=your_api_key_here")
     console.print("\nOr add it to your .env file.")
     sys.exit(1)
