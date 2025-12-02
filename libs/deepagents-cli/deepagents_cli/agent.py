@@ -329,12 +329,12 @@ def _add_interrupt_on() -> dict[str, InterruptOnConfig]:
     }
 
 
-async def _maybe_create_chrome_mcp_subagent() -> tuple[list[dict], MultiServerMCPClient | None]:
+async def _maybe_create_chrome_mcp_subagent(model: BaseChatModel | None) -> tuple[list[dict], MultiServerMCPClient | None]:
     """Optionally create a chrome-devtools MCP subagent for the CLI agent.
 
-    This is controlled by the environment variable:
-
-        DEEPAGENTS_ENABLE_CHROME_MCP=1
+    Args:
+        model: The chat model to use for the Chrome subagent. This must not be None
+               to avoid 'bind_tools' AttributeError.
 
     Requirements:
     - ``langchain-mcp-adapters`` must be installed
@@ -356,7 +356,8 @@ async def _maybe_create_chrome_mcp_subagent() -> tuple[list[dict], MultiServerMC
         return [], None
     # Configure Chrome DevTools MCP to launch Chrome with a visible window.
     # We hardcode --headless=false here so the user can actually see the browser.
-    extra_args = ["--headless=false"]
+    # Add --isolated to avoid conflicts with existing browser instances.
+    extra_args = ["--headless=false", "--isolated"]
 
     try:
         # Configure the chrome-devtools MCP server using stdio transport.
@@ -419,6 +420,10 @@ async def _maybe_create_chrome_mcp_subagent() -> tuple[list[dict], MultiServerMC
             "- To open a URL: use new_page tool with {\"url\": \"https://example.com\"} (url is required)\n"
             "- To navigate an existing page: use navigate_page with {\"type\": \"url\", \"url\": \"https://example.com\"}\n"
             "- For other navigation: use {\"type\": \"back\"|\"forward\"|\"reload\"}\n"
+            "- For screenshots: use take_screenshot with correct parameters:\n"
+            "  * PNG format: {\"format\": \"png\"} (no quality parameter)\n"
+            "  * JPEG format: {\"format\": \"jpeg\", \"quality\": 80} (quality 0-100)\n"
+            "  * WebP format: {\"format\": \"webp\", \"quality\": 80} (quality 0-100)\n"
             "- Always check tool parameters before calling tools\n"
             "- If a tool fails, report the exact error message\n\n"
             "General behavior:\n"
@@ -442,7 +447,7 @@ async def _maybe_create_chrome_mcp_subagent() -> tuple[list[dict], MultiServerMC
         ),
         "tools": chrome_tools,
         # Use the same model as the main agent to ensure compatibility
-        "model": None,  # This will use the default_model from SubAgentMiddleware
+        "model": model,  # Use the main model to avoid None model bind_tools issues
     }
     subagents: list[dict] = [chrome_subagent]
 
@@ -535,7 +540,7 @@ async def create_agent_with_config(
     interrupt_on = _add_interrupt_on()
 
     # Optionally attach a chrome-devtools MCP subagent.
-    chrome_subagents, mcp_client = await _maybe_create_chrome_mcp_subagent()
+    chrome_subagents, mcp_client = await _maybe_create_chrome_mcp_subagent(model)
 
     agent = create_deep_agent(
         model=model,

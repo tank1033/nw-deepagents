@@ -40,19 +40,39 @@ async def build_chrome_mcp_agent() -> tuple[CompiledStateGraph, MultiServerMCPCl
     # npm package and starts it via `npx` so you don't need to install it globally.
     # NOTE: Newer versions of `langchain-mcp-adapters` expect the server mapping as
     # the first positional argument (no `servers=` keyword).
-    mcp_client = MultiServerMCPClient(
-        {
-            "chrome-devtools": {
-                "command": "npx",
-                "args": ["chrome-devtools-mcp@latest", "--headless=false"],
-                "transport": "stdio",
-            },
-        }
-    )
+    try:
+        mcp_client = MultiServerMCPClient(
+            {
+                "chrome-devtools": {
+                    "command": "npx",
+                    "args": ["chrome-devtools-mcp@latest", "--headless=false", "--isolated"],
+                    "transport": "stdio",
+                },
+            }
+        )
 
-    # Load tools exposed by the server. The Python MultiServerMCPClient implementation
-    # does not expose explicit connect/close methods; it manages connections internally.
-    chrome_tools = await mcp_client.get_tools()
+        # Load tools exposed by the server. The Python MultiServerMCPClient implementation
+        # does not expose explicit connect/close methods; it manages connections internally.
+        chrome_tools = await mcp_client.get_tools()
+
+    except Exception as e:
+        print(f"ERROR: Failed to initialize Chrome DevTools MCP: {e}")
+        print("Please ensure:")
+        print("1. Node.js is installed and accessible")
+        print("2. The package 'chrome-devtools-mcp@latest' can be installed via npx")
+        print("3. Chrome browser is installed on your system")
+
+        # Create a fallback client and empty tools list
+        mcp_client = MultiServerMCPClient({})
+        chrome_tools = []
+
+    # Debug: Check if tools were loaded successfully
+    print(f"DEBUG: Loaded {len(chrome_tools)} Chrome tools")
+    if chrome_tools:
+        print(f"DEBUG: Available tools: {[tool.name for tool in chrome_tools]}")
+    else:
+        print("DEBUG: No Chrome tools were loaded. Check if chrome-devtools-mcp is installed and accessible.")
+        chrome_tools = []  # Ensure we have an empty list rather than None
 
     # Define a subagent that has access only to the Chrome DevTools MCP tools.
     chrome_subagent: dict[str, Any] = {
@@ -143,6 +163,13 @@ async def build_chrome_mcp_agent() -> tuple[CompiledStateGraph, MultiServerMCPCl
             "- Return structured data from script execution\n"
             "- Handle async operations properly in scripts\n\n"
 
+            "### Screenshot Capture:\n"
+            "- Use `take_screenshot` with correct parameters based on format:\n"
+            "- PNG: {\"format\": \"png\"} (no quality parameter)\n"
+            "- JPEG: {\"format\": \"jpeg\", \"quality\": 80} (quality: 0-100)\n"
+            "- WebP: {\"format\": \"webp\", \"quality\": 80} (quality: 0-100)\n"
+            "- Never include quality parameter for PNG format\n\n"
+
             "### Error Handling:\n"
             "- Always check for element existence before interaction\n"
             "- Use try-catch patterns in JavaScript execution\n"
@@ -190,24 +217,40 @@ async def build_chrome_mcp_agent() -> tuple[CompiledStateGraph, MultiServerMCPCl
             "Remember: You are a browser automation expert. Always prioritize reliability, "
             "error handling, and providing actionable insights from your browser interactions."
         ),
+        "model": model,  # Use the main model to avoid None model issues
         "tools": chrome_tools,
     }
 
     # Create the main DeepAgent. It will automatically receive a `task` tool
     # via SubAgentMiddleware, which can be used to invoke `chrome-devtools-agent`.
-    agent = create_deep_agent(
-        model=model,
-        tools=[],
-        subagents=[chrome_subagent],
-        system_prompt=(
-            "You are a coordinator agent. For any request that involves operating a web browser "
-            "(opening pages, interacting with DOM, running JS, taking screenshots, debugging "
-            "web apps), you SHOULD delegate the work to the `chrome-devtools-agent` subagent "
-            "via the `task` tool with subagent_type='chrome-devtools-agent'. "
-            "Describe clearly what the subagent should do in the browser and what information "
-            "it should return."
-        ),
-    )
+
+    # Only add the subagent if we have tools available
+    if chrome_tools:
+        print("DEBUG: Creating agent with Chrome DevTools subagent...")
+        agent = create_deep_agent(
+            model=model,
+            tools=[],
+            subagents=[chrome_subagent],
+            system_prompt=(
+                "You are a coordinator agent. For any request that involves operating a web browser "
+                "(opening pages, interacting with DOM, running JS, taking screenshots, debugging "
+                "web apps), you SHOULD delegate the work to the `chrome-devtools-agent` subagent "
+                "via the `task` tool with subagent_type='chrome-devtools-agent'. "
+                "Describe clearly what the subagent should do in the browser and what information "
+                "it should return."
+            ),
+        )
+    else:
+        print("DEBUG: Creating agent without Chrome subagent due to no tools available.")
+        agent = create_deep_agent(
+            model=model,
+            tools=[],
+            system_prompt=(
+                "You are a coordinator agent. Chrome DevTools MCP tools are not available. "
+                "Please inform the user that the chrome-devtools-mcp package needs to be installed "
+                "and accessible via 'npx chrome-devtools-mcp@latest'."
+            ),
+        )
 
     return agent, mcp_client
 
