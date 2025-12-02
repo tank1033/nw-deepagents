@@ -19,6 +19,12 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.pregel import Pregel
 from langgraph.runtime import Runtime
 
+try:
+    # Optional dependency for MCP-based subagents.
+    from langchain_mcp_adapters.client import MultiServerMCPClient
+except ImportError:  # pragma: no cover - optional feature
+    MultiServerMCPClient = None  # type: ignore[assignment]
+
 from deepagents_cli.agent_memory import AgentMemoryMiddleware
 from deepagents_cli.config import COLORS, config, console, get_default_coding_instructions, settings
 from deepagents_cli.integrations.sandbox_factory import get_default_working_dir
@@ -323,7 +329,123 @@ def _add_interrupt_on() -> dict[str, InterruptOnConfig]:
     }
 
 
-def create_agent_with_config(
+async def _maybe_create_chrome_mcp_subagent() -> tuple[list[dict], MultiServerMCPClient | None]:
+    """Optionally create a chrome-devtools MCP subagent for the CLI agent.
+
+    This is controlled by the environment variable:
+
+        DEEPAGENTS_ENABLE_CHROME_MCP=1
+
+    Requirements:
+    - ``langchain-mcp-adapters`` must be installed
+    - Node.js must be available so that ``npx chrome-devtools-mcp@latest`` runs
+
+    Returns:
+        (subagents, mcp_client) where:
+        - subagents: list of SubAgent-like dicts to pass to create_deep_agent
+        - mcp_client: the MCP client which must stay alive while the agent runs
+    """
+    # Always attempt to enable the chrome-devtools MCP subagent for the CLI agent.
+    # We no longer rely on environment variables to toggle this on.
+    if MultiServerMCPClient is None:
+        console.print(
+            "[yellow]chrome-devtools MCP subagent requested but "
+            "`langchain-mcp-adapters` is not installed.[/yellow]",
+            style=COLORS["tool"],
+        )
+        return [], None
+    # Configure Chrome DevTools MCP to launch Chrome with a visible window.
+    # We hardcode --headless=false here so the user can actually see the browser.
+    extra_args = ["--headless=false"]
+
+    try:
+        # Configure the chrome-devtools MCP server using stdio transport.
+        mcp_client = MultiServerMCPClient(
+            {
+                "chrome-devtools": {
+                    "command": "npx",
+                    "args": ["chrome-devtools-mcp@latest", *extra_args],
+                    "transport": "stdio",
+                },
+            }
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        console.print(
+            f"[yellow]Failed to initialize chrome-devtools MCP client: {exc}[/yellow]",
+            style=COLORS["tool"],
+        )
+        return [], None
+
+    try:
+        # The Python MultiServerMCPClient does not expose explicit connect/close
+        # methods. Creating the client and calling get_tools() is sufficient to
+        # start the underlying MCP server and discover its tools.
+        chrome_tools = await mcp_client.get_tools()
+    except Exception as exc:  # pragma: no cover - defensive
+        console.print(
+            f"[yellow]Failed to start chrome-devtools MCP server: {exc}[/yellow]",
+            style=COLORS["tool"],
+        )
+        return [], None
+
+    # Always debug-print available MCP tools for easier troubleshooting.
+    try:
+        tool_names = []
+        for tool in chrome_tools:
+            # Tools from langchain_mcp_adapters typically have a .name attribute.
+            name = getattr(tool, "name", repr(tool))
+            tool_names.append(str(name))
+        console.print(
+            "[dim]Chrome DevTools MCP tools discovered:[/dim] " + ", ".join(tool_names),
+            style=COLORS["dim"],
+        )
+    except Exception as debug_exc:  # pragma: no cover - best-effort debug
+        console.print(
+            f"[yellow]Failed to list chrome-devtools MCP tools for debug: {debug_exc}[/yellow]",
+            style=COLORS["tool"],
+        )
+
+    chrome_subagent = {
+        "name": "chrome-browser-agent",
+        "description": (
+            "Use this agent to control a Chrome browser via Chrome DevTools MCP. "
+            "Use it when the task involves opening web pages, interacting with DOM, "
+            "running JavaScript, taking screenshots, or debugging web apps."
+        ),
+        "system_prompt": (
+            "You are a specialized browser automation agent that MUST operate strictly via the "
+            "Chrome DevTools MCP tools that are available to you.\n\n"
+            "General behavior:\n"
+            "- Use the provided tools to launch or connect to a Chrome instance.\n"
+            "- Use navigation-related tools to open URLs (for example when the user asks you to "
+            "open or visit a page).\n"
+            "- After navigation, use DOM / JavaScript / inspection tools to read real content "
+            "from the loaded page before answering.\n"
+            "- Do NOT hallucinate page content or claim that a page is opened without having "
+            "actually called at least one MCP tool for that page.\n"
+            "- If a tool call fails, surface the error message back to the caller instead of "
+            "pretending the operation succeeded.\n\n"
+            "When the user asks you to open a URL like 'https://baidu.com' and wait for load:\n"
+            "- Call the appropriate navigation tool with that exact URL.\n"
+            "- Wait for the page to load using the tools the server exposes (for example by "
+            "waiting for a load event or querying the DOM until it is ready).\n"
+            "- Then read the page title and a short summary of the main visible content via "
+            "MCP tools, and return a concise Chinese summary of what you observed.\n\n"
+            "Always return concise, user-facing summaries of what you did and what you observed, "
+            "and clearly indicate when an operation failed due to MCP or browser errors."
+        ),
+        "tools": chrome_tools,
+    }
+    subagents: list[dict] = [chrome_subagent]
+
+    console.print(
+        "[dim]Chrome DevTools MCP subagent `chrome-browser-agent` enabled.[/dim]",
+        style=COLORS["tool"],
+    )
+    return subagents, mcp_client
+
+
+async def create_agent_with_config(
     model: str | BaseChatModel,
     assistant_id: str,
     tools: list[BaseTool],
@@ -404,15 +526,24 @@ def create_agent_with_config(
 
     interrupt_on = _add_interrupt_on()
 
+    # Optionally attach a chrome-devtools MCP subagent.
+    chrome_subagents, mcp_client = await _maybe_create_chrome_mcp_subagent()
+
     agent = create_deep_agent(
         model=model,
         system_prompt=system_prompt,
         tools=tools,
+        subagents=chrome_subagents or None,
         backend=composite_backend,
         middleware=agent_middleware,
         interrupt_on=interrupt_on,
     ).with_config(config)
 
     agent.checkpointer = InMemorySaver()
+
+    # Attach MCP client to the graph object so it stays alive for the lifetime
+    # of the agent process. We don't expose it in the public API.
+    if mcp_client is not None:
+        setattr(agent, "_chrome_mcp_client", mcp_client)
 
     return agent, composite_backend

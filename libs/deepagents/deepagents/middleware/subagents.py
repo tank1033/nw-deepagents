@@ -312,8 +312,33 @@ def _create_task_tool(
     )
     subagent_description_str = "\n".join(subagent_descriptions)
 
+    # Basic debug log: what subagents are available for the task tool.
+    try:
+        available_names = ", ".join(sorted(subagent_graphs.keys()))
+        print(f"[SubAgent][init] Task tool initialized with subagents: {available_names}")
+        # Log chrome-browser-agent specifically if it exists
+        if "chrome-browser-agent" in subagent_graphs:
+            print("[SubAgent][init] ✓ chrome-browser-agent is available and ready to use")
+        else:
+            print("[SubAgent][init] ✗ chrome-browser-agent is NOT available")
+    except Exception:  # pragma: no cover - best-effort debug
+        # Debug-only, never raise from here
+        pass
+
     def _return_command_with_state_update(result: dict, tool_call_id: str) -> Command:
         state_update = {k: v for k, v in result.items() if k not in _EXCLUDED_STATE_KEYS}
+        # Debug: show what keys are being updated and a short preview of the final message.
+        try:
+            keys_preview = ", ".join(state_update.keys())
+            last_msg = result.get("messages", [])[-1].text if result.get("messages") else ""
+            last_msg_preview = (last_msg[:200] + "...") if len(last_msg) > 200 else last_msg
+            print(
+                "[SubAgent][result] Preparing Command update. "
+                f"Keys: {keys_preview or '<none>'}. "
+                f"Last message preview: {last_msg_preview!r}"
+            )
+        except Exception:  # pragma: no cover - best-effort debug
+            pass
         return Command(
             update={
                 **state_update,
@@ -321,12 +346,25 @@ def _create_task_tool(
             }
         )
 
-    def _validate_and_prepare_state(subagent_type: str, description: str, runtime: ToolRuntime) -> tuple[Runnable, dict]:
+    def _validate_and_prepare_state(
+        subagent_type: str,
+        description: str,
+        runtime: ToolRuntime,
+    ) -> tuple[Runnable, dict]:
         """Prepare state for invocation."""
         subagent = subagent_graphs[subagent_type]
         # Create a new state dict to avoid mutating the original
         subagent_state = {k: v for k, v in runtime.state.items() if k not in _EXCLUDED_STATE_KEYS}
         subagent_state["messages"] = [HumanMessage(content=description)]
+        # Debug: show state keys passed down to subagent.
+        try:
+            state_keys = ", ".join(subagent_state.keys())
+            print(
+                f"[SubAgent][state] Building state for '{subagent_type}'. "
+                f"State keys: {state_keys or '<none>'}"
+            )
+        except Exception:  # pragma: no cover - best-effort debug
+            pass
         return subagent, subagent_state
 
     # Use custom description if provided, otherwise use default template
@@ -343,27 +381,55 @@ def _create_task_tool(
     ) -> str | Command:
         if subagent_type not in subagent_graphs:
             allowed_types = ", ".join([f"`{k}`" for k in subagent_graphs])
+            print(
+                f"[SubAgent][task] Requested subagent '{subagent_type}' does not exist. "
+                f"Allowed: {allowed_types}"
+            )
             return f"We cannot invoke subagent {subagent_type} because it does not exist, the only allowed types are {allowed_types}"
+        preview = (description[:200] + "...") if len(description) > 200 else description
+        print(
+            f"[SubAgent][task] Starting subagent '{subagent_type}' "
+            f"with description preview: {preview}"
+        )
         subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, runtime)
         result = subagent.invoke(subagent_state)
         if not runtime.tool_call_id:
             value_error_msg = "Tool call ID is required for subagent invocation"
             raise ValueError(value_error_msg)
+        messages = result.get("messages", [])
+        print(
+            f"[SubAgent][task] Subagent '{subagent_type}' finished. "
+            f"Returned {len(messages)} messages."
+        )
         return _return_command_with_state_update(result, runtime.tool_call_id)
 
     async def atask(
         description: str,
         subagent_type: str,
-        runtime: ToolRuntime,
+        runtime: ToolRuntime, 
     ) -> str | Command:
         if subagent_type not in subagent_graphs:
             allowed_types = ", ".join([f"`{k}`" for k in subagent_graphs])
+            print(
+                f"[SubAgent][task] (async) Requested subagent '{subagent_type}' does not exist. "
+                f"Allowed: {allowed_types}"
+            )
             return f"We cannot invoke subagent {subagent_type} because it does not exist, the only allowed types are {allowed_types}"
+        preview = (description[:200] + "...") if len(description) > 200 else description
+        print(
+            f"[SubAgent][task] Starting subagent '{subagent_type}' (async) "
+            f"with description preview: {preview}"
+        )
         subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, runtime)
         result = await subagent.ainvoke(subagent_state)
         if not runtime.tool_call_id:
             value_error_msg = "Tool call ID is required for subagent invocation"
             raise ValueError(value_error_msg)
+        messages = result.get("messages", [])
+        print(
+            f"[SubAgent][task] Subagent '{subagent_type}' (async) finished. "
+            f"Returned {len(messages)} messages."
+        )
         return _return_command_with_state_update(result, runtime.tool_call_id)
 
     return StructuredTool.from_function(
@@ -469,6 +535,12 @@ class SubAgentMiddleware(AgentMiddleware):
         """Update the system prompt to include instructions on using subagents."""
         if self.system_prompt is not None:
             system_prompt = request.system_prompt + "\n\n" + self.system_prompt if request.system_prompt else self.system_prompt
+            # Debug: log that task tool instructions are being added
+            try:
+                if "task" in [tool.name for tool in (self.tools or [])]:
+                    print("[SubAgent][middleware] Task tool is available to the agent")
+            except Exception:  # pragma: no cover - best-effort debug
+                pass
             return handler(request.override(system_prompt=system_prompt))
         return handler(request)
 

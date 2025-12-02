@@ -20,6 +20,7 @@ dependencies = [
   "runloop-api-client>=0.69.0",
   "zhipuai",
   "duckduckgo-search",
+  "langchain-mcp-adapters>=0.1.0",
 ]
 
 [project.scripts]

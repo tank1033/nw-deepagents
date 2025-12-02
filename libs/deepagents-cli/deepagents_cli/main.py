@@ -293,7 +293,7 @@ async def _run_agent_session(
     # Create agent with tools (web_search always available, uses DuckDuckGo if no Tavily key)
     tools = [http_request, fetch_url, web_search]
 
-    agent, composite_backend = create_agent_with_config(
+    agent, composite_backend = await create_agent_with_config(
         model, assistant_id, tools, sandbox=sandbox_backend, sandbox_type=sandbox_type
     )
 
