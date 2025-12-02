@@ -32,6 +32,63 @@ from deepagents_cli.shell import ShellMiddleware
 from deepagents_cli.skills import SkillsMiddleware
 
 
+def _apply_tool_wrappers(tools: list) -> list:
+    """Apply parameter validation wrappers to Chrome MCP tools.
+
+    This function wraps the take_screenshot tool to automatically remove
+    the quality parameter when format is 'png', preventing the
+    'png screenshots do not support quality' error.
+
+    Args:
+        tools: List of Chrome MCP tools
+
+    Returns:
+        List of tools with validation wrappers applied
+    """
+    from langchain_core.tools import StructuredTool
+    from typing import Any, Dict
+    import functools
+
+    def wrap_take_screenshot(original_tool):
+        """Create a wrapped take_screenshot tool that validates parameters."""
+
+        async def _validate_and_call(*, config=None, **kwargs):
+            # Remove quality parameter if format is png
+            if kwargs.get('format') == 'png' and 'quality' in kwargs:
+                # Remove quality parameter for PNG format
+                validated_kwargs = {k: v for k, v in kwargs.items() if not (k == 'quality' and kwargs.get('format') == 'png')}
+                print(f"🔧 Auto-fixed PNG screenshot: removed quality parameter (was {kwargs.get('quality')})")
+                return await original_tool.ainvoke(input=validated_kwargs, config=config)
+            else:
+                return await original_tool.ainvoke(input=kwargs, config=config)
+
+        # Create new tool with validation
+        wrapped_tool = StructuredTool.from_function(
+            func=_validate_and_call,
+            name=original_tool.name,
+            description=original_tool.description + " [Auto-validates parameters]",
+            args_schema=original_tool.args_schema,
+        )
+
+        return wrapped_tool
+
+    wrapped_tools = []
+    for tool in tools:
+        if hasattr(tool, 'name') and tool.name == 'take_screenshot':
+            # Wrap take_screenshot with parameter validation
+            try:
+                wrapped_tool = wrap_take_screenshot(tool)
+                wrapped_tools.append(wrapped_tool)
+                print("🔧 Applied parameter validation wrapper to take_screenshot tool")
+            except Exception as e:
+                print(f"⚠️  Failed to wrap take_screenshot tool: {e}, using original")
+                wrapped_tools.append(tool)
+        else:
+            wrapped_tools.append(tool)
+
+    return wrapped_tools
+
+
 def list_agents() -> None:
     """List all available agents."""
     agents_dir = settings.user_deepagents_dir
@@ -389,6 +446,9 @@ async def _maybe_create_chrome_mcp_subagent(model: BaseChatModel | None) -> tupl
         )
         return [], None
 
+    # Apply tool wrappers for parameter validation
+    chrome_tools = _apply_tool_wrappers(chrome_tools)
+
     # Always debug-print available MCP tools for easier troubleshooting.
     try:
         tool_names = []
@@ -420,10 +480,15 @@ async def _maybe_create_chrome_mcp_subagent(model: BaseChatModel | None) -> tupl
             "- To open a URL: use new_page tool with {\"url\": \"https://example.com\"} (url is required)\n"
             "- To navigate an existing page: use navigate_page with {\"type\": \"url\", \"url\": \"https://example.com\"}\n"
             "- For other navigation: use {\"type\": \"back\"|\"forward\"|\"reload\"}\n"
-            "- For screenshots: use take_screenshot with correct parameters:\n"
-            "  * PNG format: {\"format\": \"png\"} (no quality parameter)\n"
+            "- ⚠️  SCREENSHOT PARAMETER RULES (STRICT):\n"
+            "  * PNG format: ONLY {\"format\": \"png\"} - NEVER include quality parameter\n"
             "  * JPEG format: {\"format\": \"jpeg\", \"quality\": 80} (quality 0-100)\n"
             "  * WebP format: {\"format\": \"webp\", \"quality\": 80} (quality 0-100)\n"
+            "  * IMPORTANT: PNG + quality = TOOL EXCEPTION ERROR!\n"
+            "- For file operations (take_snapshot, upload_file, take_screenshot):\n"
+            "  * Use relative paths like 'filename.txt' or './output.txt'\n"
+            "  * NEVER use absolute paths starting with '/' (requires root permissions)\n"
+            "  * Example: {'filePath': 'snapshot.txt'} ✅ | {'filePath': '/tmp/file.txt'} ❌\n"
             "- Always check tool parameters before calling tools\n"
             "- If a tool fails, report the exact error message\n\n"
             "General behavior:\n"
