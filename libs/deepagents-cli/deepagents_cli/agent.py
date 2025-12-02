@@ -415,6 +415,12 @@ async def _maybe_create_chrome_mcp_subagent() -> tuple[list[dict], MultiServerMC
         "system_prompt": (
             "You are a specialized browser automation agent that MUST operate strictly via the "
             "Chrome DevTools MCP tools that are available to you.\n\n"
+            "CRITICAL TOOL USAGE INSTRUCTIONS:\n"
+            "- To open a URL: use new_page tool with {\"url\": \"https://example.com\"} (url is required)\n"
+            "- To navigate an existing page: use navigate_page with {\"type\": \"url\", \"url\": \"https://example.com\"}\n"
+            "- For other navigation: use {\"type\": \"back\"|\"forward\"|\"reload\"}\n"
+            "- Always check tool parameters before calling tools\n"
+            "- If a tool fails, report the exact error message\n\n"
             "General behavior:\n"
             "- Use the provided tools to launch or connect to a Chrome instance.\n"
             "- Use navigation-related tools to open URLs (for example when the user asks you to "
@@ -425,16 +431,18 @@ async def _maybe_create_chrome_mcp_subagent() -> tuple[list[dict], MultiServerMC
             "actually called at least one MCP tool for that page.\n"
             "- If a tool call fails, surface the error message back to the caller instead of "
             "pretending the operation succeeded.\n\n"
-            "When the user asks you to open a URL like 'https://baidu.com' and wait for load:\n"
-            "- Call the appropriate navigation tool with that exact URL.\n"
-            "- Wait for the page to load using the tools the server exposes (for example by "
-            "waiting for a load event or querying the DOM until it is ready).\n"
-            "- Then read the page title and a short summary of the main visible content via "
-            "MCP tools, and return a concise Chinese summary of what you observed.\n\n"
+            "When the user asks you to open a URL like 'https://baidu.com':\n"
+            "1. Call new_page tool with {\"url\": \"https://baidu.com\"}\n"
+            "2. Wait for the page to load\n"
+            "3. Use other tools (like take_screenshot or evaluate_script) to inspect the content\n"
+            "4. Return a concise summary of what you observed\n\n"
+            "IMPORTANT: new_page tool requires a 'url' parameter and will both create a page AND navigate to the URL.\n\n"
             "Always return concise, user-facing summaries of what you did and what you observed, "
             "and clearly indicate when an operation failed due to MCP or browser errors."
         ),
         "tools": chrome_tools,
+        # Use the same model as the main agent to ensure compatibility
+        "model": None,  # This will use the default_model from SubAgentMiddleware
     }
     subagents: list[dict] = [chrome_subagent]
 
