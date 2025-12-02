@@ -382,17 +382,25 @@ def create_model() -> BaseChatModel:
         from langchain_openai import ChatOpenAI
 
         model_name = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+        base_url = os.environ.get("OPENAI_BASE_URL")
         console.print(f"[dim]Using OpenAI model: {model_name}[/dim]")
+        if base_url:
+            console.print(f"[dim]Using OpenAI base URL: {base_url}[/dim]")
         return ChatOpenAI(
             model=model_name,
+            base_url=base_url,
         )
     if settings.has_anthropic:
         from langchain_anthropic import ChatAnthropic
 
         model_name = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
+        base_url = os.environ.get("ANTHROPIC_BASE_URL")
         console.print(f"[dim]Using Anthropic model: {model_name}[/dim]")
+        if base_url:
+            console.print(f"[dim]Using Anthropic base URL: {base_url}[/dim]")
         return ChatAnthropic(
             model_name=model_name,
+            base_url=base_url,
             # The attribute exists, but it has a Pydantic alias which
             # causes issues in IDEs/type checkers.
             max_tokens=20_000,  # type: ignore[arg-type]
